@@ -29,7 +29,7 @@ Playwright Chromium は `npm i` 後に自動でインストールされます（
 ## 使い方（基本）
 
 ```bash
-npx qic run "https://qiita.com/<user>/items/<item_id>" --scope single --delete-original
+npx qic run "https://qiita.com/<user>/items/<item_id>" --scope single --delete-original --storage-state ./secret/qic.json
 ```
 
 記事ページのURL（例: `https://qiita.com/<user>/items/<item_id>`）を **そのままコピー**して貼り付ければOKです。  
