@@ -154,9 +154,9 @@ export async function optimizeImageToTargetBytes({ inputPath, outputPath, target
         outputFormat,
         original: { width: originalWidth, height: originalHeight, bytes: meta.size },
         selected: {
-            width: bestOverall.width ?? null,
-            height: bestOverall.height ?? null,
-            scale: bestOverall.scale ?? null,
+            width: bestOverall.width,
+            height: bestOverall.height,
+            scale: bestOverall.scale,
             quality: bestOverall.quality,
             bytes: bestOverall.buffer.byteLength
         },
