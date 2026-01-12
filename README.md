@@ -29,8 +29,11 @@ Playwright Chromium は `npm i` 後に自動でインストールされます（
 ## 使い方（基本）
 
 ```bash
-npx qic run "https://qiita.com/<user>/items/<item_id>"
+npx qic run "https://qiita.com/<user>/items/<item_id>" --scope single --delete-original
 ```
+
+記事ページのURL（例: `https://qiita.com/<user>/items/<item_id>`）を **そのままコピー**して貼り付ければOKです。  
+初回は安全のため、まず **`--scope single`** で1枚だけ試し、削除も確認できるように **`--delete-original`** を付けた例にしています。
 
 起動するとChromiumが開きます。**Qiitaへログインして編集画面が表示されるまで待つ**と、処理が自動で進みます。
 
