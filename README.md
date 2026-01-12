@@ -29,7 +29,7 @@ Playwright Chromium は `npm i` 後に自動でインストールされます（
 ## 使い方（基本）
 
 ```bash
-npx qic run "https://qiita.com/<user>/items/<item_id>" --scope single --delete-original --storage-state ./secret/qic.json
+npx qic run "https://qiita.com/<user>/items/<item_id>" --scope single --delete-original --storage-state ./.secrets/qic.json
 ```
 
 記事ページのURL（例: `https://qiita.com/<user>/items/<item_id>`）を **そのままコピー**して貼り付ければOKです。  
@@ -81,7 +81,7 @@ Qiitaが2FAの場合、Playwrightの `storageState` を保存して再利用で�
 ### 初回（手動ログインして保存）
 
 ```bash
-npx qic run "https://qiita.com/<user>/items/<item_id>" --storage-state ./secret/qic.json --dry-run
+npx qic run "https://qiita.com/<user>/items/<item_id>" --storage-state ./.secrets/qic.json --dry-run
 ```
 
 - `--storage-state` のファイルが存在しない場合でもエラーにせず続行し、終了時に作成します
@@ -89,7 +89,7 @@ npx qic run "https://qiita.com/<user>/items/<item_id>" --storage-state ./secret/
 ### 次回以降（保存済みセッションを利用）
 
 ```bash
-npx qic run "https://qiita.com/<user>/items/<item_id>" --storage-state ./secret/qic.json
+npx qic run "https://qiita.com/<user>/items/<item_id>" --storage-state ./.secrets/qic.json
 ```
 
 `--storage-state` が有効でログイン情報が残っていれば、**2FAが有効なアカウントでも毎回の再ログインは不要**になります。
@@ -97,7 +97,7 @@ npx qic run "https://qiita.com/<user>/items/<item_id>" --storage-state ./secret/
 （任意）環境変数でも指定できます:
 
 ```bash
-export QIC_STORAGE_STATE_PATH=./secret/qic.json
+export QIC_STORAGE_STATE_PATH=./.secrets/qic.json
 ```
 
 ## ログ・成果物（解析用）

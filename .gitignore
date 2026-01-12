@@ -1,6 +1,8 @@
 node_modules/
 out/
 secret/
+.secret/
+.secrets/
 
 # logs/artifacts (in case paths change)
 *.log
@@ -14,7 +16,4 @@ secret/
 # Playwright (if enabled elsewhere)
 playwright-report/
 test-results/
-.secrets/
-out/
-node_modules/
 
