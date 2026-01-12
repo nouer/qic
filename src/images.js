@@ -15,9 +15,7 @@ export async function downloadImageToFile(url, outputPath) {
         res = await axios.get(url, {
             responseType: "stream",
             timeout: 60_000,
-            maxRedirects: 5,
-            // Some Qiita image objects can be AccessDenied; handle upstream.
-            validateStatus: (s) => s >= 200 && s < 300
+            maxRedirects: 5
         });
     } catch (e) {
         const status = e?.response?.status ?? null;
@@ -45,7 +43,7 @@ export async function downloadImageToFile(url, outputPath) {
 /**
  * Compress image to near target bytes.
  *
- * Output format: WEBP (keeps alpha).
+ * Output format: JPEG/PNG (Qiita upload friendly).
  *
  * @param {{ inputPath: string, outputPath: string, targetBytes: number, logger?: any }} params
  */
@@ -192,15 +190,6 @@ async function renderBuffer(inputPath, { width, height, quality, hasAlpha, outpu
             effort: 10
         })
         .toBuffer();
-}
-
-function pickCloserToTarget(best, candidate, targetBytes) {
-    if (!best) {
-        return candidate;
-    }
-    const bestDiff = Math.abs(best.buffer.byteLength - targetBytes);
-    const candDiff = Math.abs(candidate.buffer.byteLength - targetBytes);
-    return candDiff < bestDiff ? candidate : best;
 }
 
 function inferOutputFormat(outputPath) {

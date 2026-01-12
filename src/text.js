@@ -15,7 +15,7 @@ export function extractImageUrlsFromMarkdown(markdown) {
     // Very permissive; we'll post-filter with URL parsing.
     const mdImg = /!\[[^\]]*]\((\S+?)(?:\s+["'][^"']*["'])?\)/g;
     for (const match of markdown.matchAll(mdImg)) {
-        const raw = (match[1] ?? "").trim();
+        const raw = match[1].trim();
         const cleaned = stripWrappingBrackets(raw);
         if (isHttpUrl(cleaned)) {
             urls.add(cleaned);
@@ -25,7 +25,7 @@ export function extractImageUrlsFromMarkdown(markdown) {
     // HTML <img ... src="...">
     const htmlImg = /<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*?>/gi;
     for (const match of markdown.matchAll(htmlImg)) {
-        const raw = (match[1] ?? "").trim();
+        const raw = match[1].trim();
         if (isHttpUrl(raw)) {
             urls.add(raw);
         }
