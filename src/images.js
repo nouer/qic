@@ -49,6 +49,7 @@ export async function downloadImageToFile(url, outputPath) {
  */
 export async function optimizeImageToTargetBytes({ inputPath, outputPath, targetBytes, logger }) {
     await fsExtra.ensureDir(path.dirname(outputPath));
+    const log = logger ?? { info: () => {}, warn: () => {} };
 
     // Read metadata first to handle huge images.
     const img = sharp(inputPath, { failOn: "none" });
@@ -75,11 +76,11 @@ export async function optimizeImageToTargetBytes({ inputPath, outputPath, target
             throw new Error(`Failed to optimize image (unknown dimensions): ${inputPath}`);
         }
         await fsExtra.writeFile(outputPath, best.buffer);
-        logger?.info?.("optimize.result", {
+        log.info("optimize.result", {
             inputPath,
             outputPath,
             outputFormat,
-            original: { width: meta.width ?? null, height: meta.height ?? null, bytes: meta.size ?? null },
+            original: { width: meta.width, height: meta.height, bytes: meta.size },
             selected: { width: null, height: null, scale: null, quality: best.quality, bytes: best.buffer.byteLength },
             targetBytes
         });
@@ -129,11 +130,11 @@ export async function optimizeImageToTargetBytes({ inputPath, outputPath, target
             outputFormat
         });
         await fsExtra.writeFile(outputPath, fallback);
-        logger?.warn?.("optimize.result_fallback_over_target", {
+        log.warn("optimize.result_fallback_over_target", {
             inputPath,
             outputPath,
             outputFormat,
-            original: { width: originalWidth, height: originalHeight, bytes: meta.size ?? null },
+            original: { width: originalWidth, height: originalHeight, bytes: meta.size },
             selected: {
                 width: Math.max(1, Math.round(originalWidth * minScale)),
                 height: Math.max(1, Math.round(originalHeight * minScale)),
@@ -147,11 +148,11 @@ export async function optimizeImageToTargetBytes({ inputPath, outputPath, target
     }
 
     await fsExtra.writeFile(outputPath, bestOverall.buffer);
-    logger?.info?.("optimize.result", {
+    log.info("optimize.result", {
         inputPath,
         outputPath,
         outputFormat,
-        original: { width: originalWidth, height: originalHeight, bytes: meta.size ?? null },
+        original: { width: originalWidth, height: originalHeight, bytes: meta.size },
         selected: {
             width: bestOverall.width ?? null,
             height: bestOverall.height ?? null,
@@ -186,7 +187,7 @@ async function renderBuffer(inputPath, { width, height, quality, hasAlpha, outpu
             compressionLevel: 9,
             adaptiveFiltering: true,
             palette: true,
-            quality: Math.max(1, Math.min(100, quality ?? 90)),
+            quality: Math.max(1, Math.min(100, quality)),
             effort: 10
         })
         .toBuffer();

@@ -87,6 +87,14 @@ describe("images", () => {
         });
     });
 
+    test("downloadImageToFile: status=null branch (no response on error)", async () => {
+        axios.get.mockRejectedValueOnce(new Error("network down"));
+        await expect(downloadImageToFile("https://example.com/net.png", "/tmp/never.png")).rejects.toMatchObject({
+            code: "DOWNLOAD_FAILED",
+            status: null
+        });
+    });
+
     test("optimizeImageToTargetBytes: produces output <= targetBytes for JPEG", async () => {
         const dir = await fs.mkdtemp(path.join(os.tmpdir(), "qic-opt-"));
         const inputPath = path.join(dir, "in.jpg");
