@@ -17,12 +17,11 @@ import fs from "node:fs/promises";
  * - 一覧に見つからない/ページングで取りこぼす/表示が遅い等は起こり得るため、
  *   見つからない場合はログを残して続行する（ツール全体を失敗させない）。
  *
- * @param {{
- *   page: import("playwright").Page,
- *   logger: any,
- *   originalUrls: string[],
- *   artifactsDir: string
- * }} params
+ * @param {Object} params
+ * @param {any} params.page Playwright Page（型はJSDoc生成互換のためany）
+ * @param {any} params.logger ロガー
+ * @param {string[]} params.originalUrls 削除対象の元URL一覧
+ * @param {string} params.artifactsDir 成果物ディレクトリ（予約。将来拡張用）
  */
 export async function deleteQiitaUploadedFilesByUrls({ page, logger, originalUrls }) {
     // URLから「削除対象を識別するキー（UUID）」を取り出す。
@@ -203,7 +202,7 @@ async function collectUuidsFromUploadedImagesPage(page) {
  * This avoids touching the article editor (safer).
  *
  * @param {{
- *   page: import("playwright").Page,
+ *   page: any,
  *   logger: any,
  *   localImagePath: string
  * }} params

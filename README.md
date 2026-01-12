@@ -147,6 +147,18 @@ export QIC_STORAGE_STATE_PATH=./.secrets/qic.json
 - `docs/basic-design.md`: 基本設計
 - `docs/detailed-design.md`: 詳細設計
 
+## APIドキュメント（ソースコードから生成）
+
+`src/` のJSDocコメントから、HTMLドキュメントを生成できます。
+
+```bash
+npm run docs:api
+```
+
+生成物:
+
+- `docs/api/index.html`
+
 ## 注意
 
 - QiitaのUI変更により自動化が壊れる可能性があります

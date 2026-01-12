@@ -18,21 +18,20 @@ import { uploadFileAndGetQiitaImageUrlViaSettings } from "./qiitaUploadedFilesUi
 
     /**
      * @typedef {Object} EditorContext
-     * @property {() => Promise<string>} getBody
-     * @property {(body: string) => Promise<void>} setBody
-     * @property {(urlMap: Map<string, string>) => Promise<void>} replaceUrls
-     * @property {(localImagePath: string) => Promise<string>} uploadImageAndGetUrl
+     * @property {function(): Promise<string>} getBody 本文を取得する
+     * @property {function(string): Promise<void>} setBody 本文を設定する（全文書き換え）
+     * @property {function(Map.<string, string>): Promise<void>} replaceUrls URL置換をエディタへ反映する
+     * @property {function(string): Promise<string>} uploadImageAndGetUrl 画像をアップロードし、生成されたURLを返す
      */
 
 /**
- * @param {{
- *   page: import("playwright").Page,
- *   context?: import("playwright").BrowserContext,
- *   editUrl: string,
- *   logger?: any,
- *   artifactsDir?: string,
- *   runInEditor: (ctx: EditorContext & { clickUpdate: () => Promise<void> }) => Promise<void>
- * }} params
+ * @param {Object} params
+ * @param {any} params.page Playwright Page（型はJSDoc生成互換のためany）
+ * @param {any} [params.context] Playwright BrowserContext（型はJSDoc生成互換のためany）
+ * @param {string} params.editUrl 編集画面URL
+ * @param {any} [params.logger] 任意のロガー
+ * @param {string} [params.artifactsDir] 失敗時の成果物出力ディレクトリ
+ * @param {function(Object): Promise<void>} params.runInEditor エディタ操作本体（コールバック）
  */
 export async function openQiitaEditorAndRun({ page, context = null, editUrl, logger = null, artifactsDir = null, runInEditor }) {
     page.setDefaultTimeout(120_000);
@@ -469,7 +468,7 @@ async function findBestBodyTextarea(page, log) {
         return null;
     }
 
-    /** @type {{ idx: number, name: string|null, id: string|null, len: number }[]} */
+    /** @type {Array<Object>} */
     const metas = [];
     for (let i = 0; i < handles.length; i += 1) {
         const h = handles[i];
@@ -803,7 +802,7 @@ function makeCodeMirror6Editor(page) {
 
                 const doc = stateDoc;
                 let replacedCount = 0;
-                /** @type {{from:number,to:number,insert:string}[]} */
+                /** @type {Array<Object>} */
                 const changes = [];
                 for (const [fromStr, toStr] of pairs) {
                     if (!fromStr) continue;

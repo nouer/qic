@@ -17,3 +17,6 @@ secret/
 playwright-report/
 test-results/
 
+# generated docs (JSDoc)
+docs/api/
+

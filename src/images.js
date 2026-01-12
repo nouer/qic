@@ -70,7 +70,11 @@ export async function downloadImageToFile(url, outputPath) {
  *   そのため、どうしても入らない場合は “最小限の縮小＋そこそこの品質” で出力し、
  *   パイプラインを止めない方針を取る（呼び出し側でログを見て判断できる）。
  *
- * @param {{ inputPath: string, outputPath: string, targetBytes: number, logger?: any }} params
+ * @param {Object} params
+ * @param {string} params.inputPath 入力画像ファイルパス
+ * @param {string} params.outputPath 出力画像ファイルパス（拡張子でjpeg/pngを決める）
+ * @param {number} params.targetBytes 目標バイト数（この値以下に収まる設定を探索する）
+ * @param {any} [params.logger] 任意のロガー（info/warn を想定）
  */
 export async function optimizeImageToTargetBytes({ inputPath, outputPath, targetBytes, logger }) {
     await fsExtra.ensureDir(path.dirname(outputPath));

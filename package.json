@@ -12,6 +12,7 @@
     "lint": "node -c src/cli.js && node -c src/qic.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "docs:api": "jsdoc -c jsdoc.json",
     "postinstall": "playwright install chromium"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.16",
+    "jsdoc": "^4.0.5",
     "playwright": "^1.50.0",
     "vitest": "^4.0.16"
   }
