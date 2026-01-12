@@ -1,7 +1,17 @@
 /**
- * Qiita editor automation via Playwright.
+ * PlaywrightによるQiitaエディタ自動操作。
  *
- * NOTE: Qiita UI can change; selectors here aim to be resilient.
+ * このファイルの役割:
+ * - Qiitaの /edit 画面を開き、ログインが必要ならユーザー操作を待つ
+ * - エディタ実装（CodeMirror6 / CodeMirror / Monaco / textarea / contenteditable）を推定し、
+ *   「本文の取得/設定」「URL置換」「画像アップロード」「更新ボタン押下」を提供する
+ *
+ * 設計上の重要ポイント:
+ * - QiitaのUI/DOMは頻繁に変わるため、セレクタは“それっぽい候補を複数持つ” + “フォールバック”前提
+ * - Playwrightの actionability チェック（click待ち等）はQiita上でハングすることがあるため、
+ *   重要箇所は evaluate(click) 等の“軽い”手段を優先する
+ * - CodeMirror6 は DOM が仮想化されるため、見えている行だけを読むと本文が欠ける。
+ *   そのため rawBody（React store / autosave GraphQL payload）等の“全文ソース”を優先して読む。
  */
 
 import { uploadFileAndGetQiitaImageUrlViaSettings } from "./qiitaUploadedFilesUi.js";
@@ -50,8 +60,9 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
     log.info(`Opening editor: ${editUrl}`);
     await page.goto(editUrl, { waitUntil: "domcontentloaded" });
 
-    // Wait for user to login if needed.
-    // If not logged in, Qiita may redirect to login page or show a login prompt.
+    // ログイン待ち:
+    // 未ログインの場合、Qiitaは login へリダイレクトしたり、編集画面内にログイン導線を出す。
+    // ここでは「/edit 相当のURL + エディタ要素」が揃うまで待つ。
     try {
         await waitForLoginAndEditorReady(page, editUrl, log);
     } catch (e) {
@@ -95,7 +106,10 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
             }
             log.warn("In-place replace failed; falling back to full rewrite.", result);
         }
-        // Fallback: rewrite full body.
+        // フォールバック（全文書き換え）:
+        // - URLだけを狙ってin-place置換できない場合に備える。
+        // - ただし全文書き換えは “エディタの内部整形” を誘発しやすいので、
+        //   呼び出し側（runQic）で diff-check を必ず行う。
         const current = await editor.getBody();
         const out = current;
         let replaced = out;
@@ -103,7 +117,10 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
             replaced = replaced.split(from).join(to);
         }
         await editor.setBody(replaced);
-        // Wait until the editor reflects the rewritten body (MUST be live, not the initial React store snapshot).
+        // 書き換えがエディタに反映されたことを確認する。
+        // ここで “live” を優先する理由:
+        // - 初期React storeのスナップショットは古い場合がある
+        // - CodeMirror6 は DOM 仮想化で部分本文しか読めないことがある
         const deadline = Date.now() + 15_000;
         const replacedN = normalizeForCompare(replaced);
         let matched = false;
@@ -123,7 +140,11 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
     };
 
     const uploadImageAndGetUrl = async (localImagePath) => {
-        // Safer strategy: upload via settings page to avoid touching editor content.
+        // より安全な戦略:
+        // 記事エディタ内のアップロード導線を触ると、本文に余計な文字が挿入されたり、
+        // エディタ状態が壊れるリスクがある。
+        // そのため「設定 > アップロードしたファイル」経由でアップロードし、
+        // 画像URLだけ取得してエディタに戻る方式を優先する。
         try {
             const currentUrl = page.url();
             const uploadedUrl = await uploadFileAndGetQiitaImageUrlViaSettings({
@@ -155,7 +176,7 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
                 });
             };
 
-            // Ensure we are on editor page (some flows may navigate elsewhere).
+            // 念のため、編集ページ上にいることを保証する（途中で他ページに遷移しているケースがある）。
             if (!page.url().includes("/edit")) {
                 log.warn("Not on edit page; navigating back to edit URL before submit.", { currentUrl: page.url(), editUrl });
                 await page.goto(editUrl, { waitUntil: "domcontentloaded" });
@@ -176,7 +197,8 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
 
             log.info("PHASE: click_submit_button");
 
-            // These can unexpectedly block for a long time; keep them best-effort with short timeouts + logs.
+            // これらはQiita側の状態により長時間ブロックすることがあるため、
+            // “ベストエフォート + 短いtimeout + 詳細ログ”で進める。
             step("pre_click_scroll_top");
             await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
 
@@ -189,9 +211,13 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
             step("pre_click_escape");
             await page.keyboard.press("Escape").catch(() => {});
 
-            // IMPORTANT: avoid Playwright actionability checks here; they can hang on Qiita.
-            // Prefer clicking the resolved element itself (fast, no actionability), then try a text-based DOM search,
-            // and finally fall back to locator.click().
+            // 重要:
+            // Playwrightの click() は「表示/覆い/有効化」などの actionability 判定で待ち続け、
+            // Qiita上ではハングすることがある。
+            // そのため次の順に試す:
+            // 1) element.click() を evaluate で直叩き（判定なしで速い）
+            // 2) 文字列（公開設定へ/更新等）でDOM検索して click
+            // 3) 最後の手段として locator.click({force:true})
             const outer = await updateButton
                 .evaluate((el) => (el.outerHTML ?? "").slice(0, 400))
                 .catch(() => null);
@@ -249,7 +275,7 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
                 }
             }
 
-            // Wait for either confirmation dialog OR leaving edit page OR "saving" UI.
+            // 確認ダイアログの出現 / editページからの離脱 / “保存中” 表示のいずれかを待つ。
             step("wait_publish_settings_or_confirm_start");
             const dialog = page.locator("dialog[open]").first();
             const commitMessage = page.locator("#commitMessage, textarea[name='commitMessage']").first();
@@ -259,8 +285,8 @@ export async function openQiitaEditorAndRun({ page, context = null, editUrl, log
             const confirmGlobal = page.getByRole("button", { name: /記事を更新する|投稿する|公開する/ }).first();
             const loading = page.getByText(/更新中です|保存中|処理中/).first();
 
-            // Some accounts/layouts take a long time to open the publish settings UI.
-            // Keep the user informed while polling.
+            // アカウント/レイアウトによっては公開設定UIの表示に時間がかかる。
+            // その間、ログで進捗（elapsed）を出しつつポーリングする。
             const waitStart = Date.now();
             let lastProgressLogAt = 0;
             const maxWaitMs = 180_000;
@@ -332,8 +358,10 @@ function normalizeForCompare(s) {
 }
 
 async function waitForLoginAndEditorReady(page, editUrl, log) {
-    // If redirected to login, user must login manually.
-    // We'll wait until we're on the edit URL and editor elements appear.
+    // ログイン/編集準備待ち:
+    // - /login へ飛ばされる場合はユーザーが手動ログインする必要がある
+    // - ここでは「/edit っぽいURLにいる」かつ「エディタ要素（textarea or contenteditable）がある」
+    //   まで最大15分待つ（2FA等の手動操作時間を見込む）
     const deadline = Date.now() + 15 * 60_000;
     let lastLogAt = 0;
     while (Date.now() < deadline) {
@@ -370,6 +398,9 @@ async function waitForLoginAndEditorReady(page, editUrl, log) {
 }
 
 async function detectEditor(page, log) {
+    // Qiitaは時期・アカウント・実験フラグによってエディタ実装が変わる。
+    // ここでは判定できる限り “専用実装（CM6/CM/Monaco）” を優先し、
+    // ダメなら textarea → contenteditable の順でフォールバックする。
     const engine = await detectEditorEngine(page);
     if (engine?.kind === "codemirror6") {
         log.info("Using CodeMirror6 editor.");
@@ -529,7 +560,7 @@ function makeCodeMirror6Editor(page) {
     const cmContent = page.locator(".cm-editor .cm-content[contenteditable='true']").first();
     return {
         async getBody() {
-            // Prefer raw markdown from React store (keeps correct newlines).
+            // 可能ならReact storeから rawBody を取る（改行が正確で、DOM仮想化の影響も受けない）。
             const storeBody = await page.evaluate(() => {
                 try {
                     const el = document.querySelector("script[data-js-react-on-rails-store='AppStoreWithReactOnRails']");
@@ -553,7 +584,8 @@ function makeCodeMirror6Editor(page) {
                 return storeBody;
             }
 
-            // Fallback: join visual lines with newline.
+            // フォールバック: DOM上にある可視行を連結する。
+            // ※ CM6は仮想化されるため “全文ではない可能性” がある（最後の手段）。
             const joined = await page.evaluate(() => {
                 const lines = Array.from(document.querySelectorAll(".cm-content .cm-line"));
                 if (lines.length === 0) return null;
@@ -567,8 +599,9 @@ function makeCodeMirror6Editor(page) {
             return await body.innerText();
         },
         async getBodyLive() {
-            // IMPORTANT: CM6 virtualizes the DOM; reading ".cm-line" only gives visible lines.
-            // Prefer EditorView.state.doc (full document) if we can reach the view.
+            // 重要: CM6はDOMを仮想化するため、見えている行だけ読むと本文が欠ける。
+            // まず EditorView.state.doc（全文）をDOMから辿れないか試し、
+            // ダメなら autosave（GraphQL SaveEditingArticle）の payload から rawBody を抜く。
             const fromView = await page.evaluate(() => {
                 const isView = (v) =>
                     v && typeof v.dispatch === "function" && v.state && v.state.doc && typeof v.state.doc.toString === "function";
@@ -605,8 +638,10 @@ function makeCodeMirror6Editor(page) {
                 return fromView;
             }
 
-            // Next best (reliable full markdown): capture autosave request payload (GraphQL SaveEditingArticle).
-            // Qiita's CM6 editor virtualizes DOM, but the autosave payload includes full rawBody.
+            // 次善策（比較的信頼できる全文取得）:
+            // autosave の GraphQL リクエスト（SaveEditingArticle）には rawBody が含まれる。
+            // テキストを少しだけ弄って戻す（insert+backspace）ことで autosave をトリガし、
+            // その payload から本文を読む。
             try {
                 if ((await cmContent.count()) > 0) {
                     await cmContent.click({ timeout: 30_000 });
@@ -720,6 +755,9 @@ function makeCodeMirror6Editor(page) {
          * @param {Map<string, string>} urlMap
          */
         async replaceUrls(urlMap) {
+            // CM6のドキュメントに対して “差分置換” を行う。
+            // これが成功すれば、全文書き換え（setBody）よりもUI整形の副作用が少ない。
+            // ただし EditorView をDOMから辿れない場合があるので best-effort。
             const entries = Array.from(urlMap.entries());
             const direct = await page.evaluate((pairs) => {
                 const isView = (v) =>
@@ -788,9 +826,10 @@ function makeCodeMirror6Editor(page) {
                 return direct;
             }
 
-            // IMPORTANT: Do NOT try to use CodeMirror search panel here.
-            // It is flaky (browser shortcuts / focus / popup) and can crash the run.
-            // Let the caller fall back to full rewrite via setBody(), guarded by diff-check.
+            // 重要:
+            // CodeMirrorの検索/置換パネル（Ctrl+F等）に頼ると、
+            // ショートカット競合・フォーカス・ポップアップ等で不安定になりやすく、実行が壊れがち。
+            // ここでは無理せず失敗を返し、呼び出し側で全文書き換えフォールバックに任せる（diff-check前提）。
             return direct ?? { ok: false, reason: "EditorView not found on DOM", replacedCount: 0 };
         }
     };
@@ -1108,6 +1147,8 @@ async function revertEditorTo(page, editor, before, log) {
 }
 
 function attachPlaywrightEventLogs(page, log) {
+    // Playwrightイベントをログに流す。
+    // UI自動化は「何が起きたか」が追えないと調査不能になるため、重要イベントを記録する。
     page.on("console", (msg) => {
         log.debug("page.console", { type: msg.type(), text: msg.text() });
     });
@@ -1126,9 +1167,9 @@ function attachPlaywrightEventLogs(page, log) {
             hostname = "";
         }
 
-        // Reduce noise: Qiita pages trigger many third-party requests (ads/analytics/etc),
-        // and navigations often cause net::ERR_ABORTED which is usually not actionable.
-        // Keep WARN for qiita.com / qiita-image-store / upload-related requests.
+        // ノイズ削減:
+        // Qiitaは広告/解析等の第三者通信が多く、遷移に伴う net::ERR_ABORTED も頻出する。
+        // すべてWARNにするとログが埋まるので、qiita.com/画像/アップロード周りを中心にWARNを残す。
         const isLikelyActionable =
             hostname === "qiita.com" ||
             hostname.endsWith(".qiita.com") ||
@@ -1193,6 +1234,8 @@ async function dumpArtifacts(page, context, artifactsDir, label, log) {
         const htmlPath = `${artifactsDir}/${prefix}.html`;
         const tracePath = `${artifactsDir}/${prefix}.zip`;
 
+        // 失敗時に調査できるよう、スクショ/HTML/trace を可能な範囲で保存する。
+        // trace は context.tracing を開始している場合のみ生成される。
         const screenshotErr = await page
             .screenshot({ path: screenshotPath, fullPage: true })
             .then(() => null)

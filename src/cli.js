@@ -2,6 +2,21 @@
 import { Command } from "commander";
 import { runQic } from "./qic.js";
 
+/**
+ * CLIエントリポイント。
+ *
+ * このプロジェクト（QIC: Qiita Image Compressor/Optimizer）は、
+ * Qiita記事の本文中にある画像URLを対象に
+ * 1) 画像をダウンロード
+ * 2) 目標サイズ付近まで圧縮（または形式変換）
+ * 3) Qiitaへ再アップロード
+ * 4) 本文中のURLを新URLへ置換
+ * 5) （オプション）元のアップロード済み画像を削除
+ * を Playwright で自動化します。
+ *
+ * ここでは commander を使って、実行時オプションの受け取りとバリデーションを行い、
+ * 実処理は `runQic()` に委譲します（CLIは薄く保つ方針）。
+ */
 const program = new Command();
 
 program.name("qic").description("Qiita image optimizer via Playwright").version("0.1.0");
@@ -27,6 +42,9 @@ program
         const targetKb = Number(options.targetKb);
         const concurrency = Number(options.concurrency);
 
+        // CLI入力の早期バリデーション。
+        // ここで落としておくと、Playwright起動やネットワーク処理をする前に
+        // ユーザーへ分かりやすいエラーを返せます。
         if (scope !== "all" && scope !== "single") {
             throw new Error("--scope must be 'all' or 'single'");
         }
@@ -37,6 +55,10 @@ program
             throw new Error("--concurrency must be a positive number");
         }
 
+        // headless/headed の扱い:
+        // - デフォルトは headed（ブラウザを表示）にして、ログイン等の手動操作ができるようにする。
+        // - headless は CI 等で使う想定だが、ログインが必要なケースが多いので
+        //   `--storage-state`（ログイン状態の保存/復元）併用を推奨する。
         const headless =
             options.headless === true
                 ? true
@@ -44,11 +66,16 @@ program
                     ? false
                     : false; // default: headed
 
+        // storageState は CLI と環境変数のどちらでも指定可能にする。
+        // - CLI: --storage-state <path>
+        // - env: QIC_STORAGE_STATE_PATH
+        // どちらも無ければ null（毎回手動ログインの可能性がある）。
         const storageStatePath = options.storageState ?? process.env.QIC_STORAGE_STATE_PATH ?? null;
 
         await runQic({
             qiitaArticleUrl,
             scope,
+            // 内部は bytes で扱う（Sharp/FS/HTTPは bytes が自然）。
             targetBytes: Math.round(targetKb * 1024),
             outDir: options.out,
             logFilePath: options.logFile ?? null,

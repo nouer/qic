@@ -2,10 +2,20 @@ import path from "node:path";
 import fs from "node:fs/promises";
 
 /**
- * Delete uploaded files on Qiita settings page by matching image UUID in URL.
- * Best-effort: if not found, logs and continues.
+ * Qiitaの「アップロードしたファイル」設定画面をUI操作して、
+ * 指定URLに対応するアップロード済み画像を削除する（ベストエフォート）。
  *
- * This is intentionally UI-driven because Qiita API doesn't expose delete for uploaded images.
+ * なぜUI駆動か:
+ * - Qiitaはアップロード済み画像の削除APIを外部に公開していないため、
+ *   実際の画面操作（クリック）でしか削除できない。
+ *
+ * 安全上の注意:
+ * - 画像削除は不可逆（復元できない）なので、呼び出し側では
+ *   「公開記事に新URLが反映されている」ことを検証できた場合のみ実行する。
+ *
+ * ベストエフォート方針:
+ * - 一覧に見つからない/ページングで取りこぼす/表示が遅い等は起こり得るため、
+ *   見つからない場合はログを残して続行する（ツール全体を失敗させない）。
  *
  * @param {{
  *   page: import("playwright").Page,
@@ -15,6 +25,8 @@ import fs from "node:fs/promises";
  * }} params
  */
 export async function deleteQiitaUploadedFilesByUrls({ page, logger, originalUrls }) {
+    // URLから「削除対象を識別するキー（UUID）」を取り出す。
+    // キーが取れないURLは削除対象にできないため除外する。
     const deletables = originalUrls
         .map((u) => ({ url: u, key: parseQiitaImageKey(u) }))
         .filter((x) => x.key !== null);
@@ -55,7 +67,9 @@ export async function deleteQiitaUploadedFilesByUrls({ page, logger, originalUrl
                 remaining: remaining.size
             });
 
-            // Page-level search: collect UUIDs present on the page once, then intersect with remaining.
+            // 1ページ分の処理:
+            // - まずページ内に存在するUUID一覧をまとめて抽出する（DOM走査は高コストなので一回で済ませる）
+            // - それと remaining（未削除）を突き合わせて “このページで削除できる候補” を決める
             const pageUuids = await collectUuidsFromUploadedImagesPage(page).catch(() => []);
             const hits = [];
             for (const uuid of remaining) {
@@ -65,7 +79,9 @@ export async function deleteQiitaUploadedFilesByUrls({ page, logger, originalUrl
             }
 
             if (hits.length === 0) {
-                // Timing workaround: if the list is still swapping/late-rendering, reload once before giving up on this page.
+                // タイミング対策:
+                // SPAの遅延描画で「今はまだDOMに出ていない」可能性がある。
+                // そのため、このページにヒットが無い場合は一度だけ reload して再抽出する。
                 const beforeFp = await getUploadedImagesListFingerprint(page).catch(() => null);
                 await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
                 await waitForUploadedImagesListReady(page, logger);
@@ -91,7 +107,8 @@ export async function deleteQiitaUploadedFilesByUrls({ page, logger, originalUrl
             let deletedOnThisPage = 0;
             for (const uuid of hits) {
                 logger.info("delete_originals.found_on_page", { passIndex, pageIndex, uuid, url: currentListUrl });
-                // Delete one by one for safety.
+                // 削除は1件ずつ（安全のため）。
+                // まとめてクリックすると、ダイアログの取り違え/誤削除リスクが上がる。
                 // eslint-disable-next-line no-await-in-loop
                 const ok = await deleteIfVisibleOnCurrentPage(page, uuid, logger);
                 if (ok) {
@@ -152,7 +169,8 @@ export async function deleteQiitaUploadedFilesByUrls({ page, logger, originalUrl
 }
 
 async function collectUuidsFromUploadedImagesPage(page) {
-    // Collect UUIDs from the UploadedImagesSettings component by scanning href/src/data-src/srcset.
+    // UploadedImagesSettings コンポーネント配下から UUID を抽出する。
+    // href/src/data-src/srcset を広く走査し、S3 URL やサムネURLに含まれる UUID を拾う。
     return await page.evaluate(() => {
         const root = document.querySelector("[id^='UploadedImagesSettings-react-component']");
         if (!root) return [];
@@ -191,7 +209,14 @@ async function collectUuidsFromUploadedImagesPage(page) {
  * }} params
  */
 export async function uploadFileAndGetQiitaImageUrlViaSettings({ page, logger, localImagePath }) {
-    // Capture existing URLs from list page first, then upload, then diff the list page again.
+    // 手順:
+    // 1) 一覧ページで “既存URL集合” を取得
+    // 2) アップロードページでアップロード
+    // 3) ネットワーク or 一覧の差分から “新規URL” を特定して返す
+    //
+    // 一覧差分方式を取る理由:
+    // - UI表示が遅い/順序が変わることがあり、単純に「先頭が新規」とは言えない
+    // - 事前集合との差分なら安定して“新規”を判定できる
     const listUrl = await openUploadedFilesListPage(page, logger);
     const beforeList = await collectQiitaImageStoreUrlsFromListPage(page, logger);
     const beforeSet = new Set(beforeList);
@@ -218,7 +243,7 @@ export async function uploadFileAndGetQiitaImageUrlViaSettings({ page, logger, l
         }
     }
 
-    // Prefer grabbing the final URL from network responses (faster and avoids waiting for list rendering).
+    // 可能ならネットワークレスポンスから新URLを取得する（高速で、一覧レンダリング待ちを避けられる）。
     const netUrlPromise = waitForQiitaImageStoreUrlFromNetwork(page, logger, { timeoutMs: 8_000, ignoreUrls: beforeSet });
 
     logger.info("Uploading file via upload page...", { localImagePath });
@@ -276,6 +301,10 @@ export async function uploadFileAndGetQiitaImageUrlViaSettings({ page, logger, l
 }
 
 async function waitForQiitaImageStoreUrlFromNetwork(page, logger, { timeoutMs, ignoreUrls }) {
+    // アップロード処理中に発生するレスポンスから qiita-image-store URL を見つける。
+    // - 直接S3 URLがレスポンスURLとして出る場合
+    // - JSONレスポンス本文の中にURLが含まれる場合
+    // どちらも拾えるようにする。
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
         const res = await page
@@ -387,7 +416,8 @@ async function waitForUploadedImagesListReady(page, logger, { timeoutMs = 30_000
     await heading.waitFor({ timeout: timeoutMs });
 
     const container = page.locator("[id^='UploadedImagesSettings-react-component']").first();
-    // Container can exist but be temporarily hidden during paging; don't require visible here.
+    // ページング中はコンテナが一時的に隠れることがあるため、
+    // “visible” ではなく “attached” を条件にする。
     await container.waitFor({ state: "attached", timeout: timeoutMs });
 
     const startedAt = Date.now();
@@ -397,7 +427,11 @@ async function waitForUploadedImagesListReady(page, logger, { timeoutMs = 30_000
         await assertNotLoggedOut(page);
 
         const containerVisible = await container.isVisible().catch(() => false);
-        // Heuristic: list is "ready enough" when the container has either a qiita-image-store link OR a delete button.
+        // “描画完了” の判定は厳密に取れないため、ヒューリスティックで判断する:
+        // - qiita-image-store へのリンクが出ている
+        // - 削除ボタンが出ている
+        // - 空状態（ありません等）が出ている
+        // のいずれかなら “操作しても大丈夫そう” とみなす。
         const linkCount = await container.locator("a[href^='https://qiita-image-store.s3.']").count().catch(() => 0);
         const deleteBtnCount = await container.getByRole("button", { name: /削除|Delete/i }).count().catch(() => 0);
         const emptyStateCount = await container.getByText(/ありません|存在しません/).count().catch(() => 0);
@@ -546,8 +580,8 @@ async function goToNextUploadedImagesPageIfExists(
         return page.url().startsWith("https://qiita.com/settings/uploaded_images");
     };
 
-    // Prefer deterministic paging by URL when we know the current page index.
-    // This avoids clicking the wrong "次のページ" control and accidentally navigating elsewhere (e.g., /settings/uploading_images).
+    // pageIndex が分かる場合は URLで次ページへ移動する（決定的で安全）。
+    // “次のページ” ボタンはページ内に複数存在し得て、誤クリックで別ページへ飛ぶ事故があるため。
     if (typeof pageIndex === "number") {
         const nextUrl = `https://qiita.com/settings/uploaded_images?page=${pageIndex + 1}`;
         logger.info("Paging to next uploaded images page (goto)...", { nextUrl });
@@ -697,12 +731,13 @@ async function deleteIfVisibleOnCurrentPage(page, uuid, logger) {
         logger.info("delete_originals.step", { step: name, uuid, url: page.url(), elapsedMs: Date.now() - startedAt, ...extra });
     };
 
-    // Anchor on uuid in common attributes. Some layouts lazy-load images into data-src/srcset.
+    // uuid が含まれる要素（href/src/data-src/srcset）をアンカーにして “該当行” を見つける。
+    // レイアウトによっては lazy-load で data-src/srcset に入るため、それも対象にする。
     const hitSelector =
         `[href*="${uuid}"],[src*="${uuid}"],[data-src*="${uuid}"],[srcset*="${uuid}"]`;
     let hit = page.locator(hitSelector).first();
 
-    // If not found immediately, try a few scroll nudges to trigger lazy rendering.
+    // すぐ見つからない場合は、少しスクロールしてlazy描画を促す。
     if ((await hit.count()) === 0) {
         for (let i = 0; i < 6; i += 1) {
             await page.evaluate((k) => window.scrollTo(0, k * window.innerHeight), i).catch(() => {});
@@ -724,7 +759,7 @@ async function deleteIfVisibleOnCurrentPage(page, uuid, logger) {
         logger.warn("delete_originals.scroll_failed", { uuid, url: page.url(), error: String(e) });
     });
 
-    // Find a nearby delete button.
+    // hit の近傍から削除ボタンを探す。
     step("find_delete_button");
     const scope = hit.locator("xpath=ancestor-or-self::*[self::li or self::tr or self::div][1]");
     const deleteBtn = scope.getByRole("button", { name: /削除|Delete/i }).first();
@@ -742,7 +777,8 @@ async function deleteIfVisibleOnCurrentPage(page, uuid, logger) {
         });
     } else {
         step("click_delete_button");
-        // Some UIs use native confirm() dialogs. Pre-arm an accept handler before clicking.
+        // 一部UIは window.confirm() のネイティブダイアログを使う。
+        // クリック前に dialog イベントを仕掛けて accept できるようにする（取りこぼし防止）。
         const nativeDialogPromise = page
             .waitForEvent("dialog", { timeout: 3_000 })
             .then(async (d) => {
@@ -758,8 +794,8 @@ async function deleteIfVisibleOnCurrentPage(page, uuid, logger) {
         await nativeDialogPromise;
     }
 
-    // Confirm dialog if present.
-    // IMPORTANT: do NOT click a "global" confirm button by text; it can accidentally re-click another delete button on the page.
+    // 確認ダイアログが出る場合は、そのダイアログの中のボタンだけを押す。
+    // 重要: 画面全体から “削除” 文字列で探して押すと、別要素を誤クリックする危険がある。
     step("confirm_if_needed");
     const modal = page.locator("dialog[open], [role='dialog'], [aria-modal='true']").first();
     const modalVisible = await modal
@@ -783,7 +819,7 @@ async function deleteIfVisibleOnCurrentPage(page, uuid, logger) {
         }
     }
 
-    // Wait until the uuid is no longer present on the page (best-effort).
+    // uuid がページから消えるまで待つ（ベストエフォート）。
     step("wait_disappear");
     const deadline = Date.now() + 15_000;
     let lastBeatAt = 0;
@@ -805,7 +841,7 @@ async function deleteIfVisibleOnCurrentPage(page, uuid, logger) {
         await page.waitForTimeout(500);
     }
 
-    // Sometimes UI doesn't re-render immediately; reload once and re-check.
+    // UIがすぐ再描画されない場合があるため、1回だけ reload して確認する。
     step("reload_and_recheck");
     await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
     await waitForUploadedImagesListReady(page, logger, { timeoutMs: 30_000 }).catch(() => {});

@@ -12,6 +12,32 @@ import { deleteQiitaUploadedFilesByUrls } from "./qiitaUploadedFilesUi.js";
 import { verifyOnlyUrlChanges } from "./diffCheck.js";
 
 /**
+ * QICの中核処理（CLIから呼ばれる）。
+ *
+ * 目的:
+ * - Qiita記事本文に埋め込まれた画像URLを検出し、容量が大きい画像を圧縮して再アップロードし、
+ *   本文中のURLだけを安全に差し替える。
+ *
+ * 重要な安全設計:
+ * - 本文の書き換えは「URL置換のみ」を原則とし、置換以外の差分が混入した場合は更新を中止する。
+ *   → `verifyOnlyUrlChanges()` がその安全装置（異常時は artifacts にエビデンスを出力）。
+ * - 画像の“元ファイル削除”は非常に危険なので、更新後に公開記事が反映されたことを検証できた場合のみ、
+ *   かつユーザーが `deleteOriginal` を明示指定した場合にだけ実行する。
+ *
+ * フェーズ概要（ログに PHASE: を出す）:
+ * - open_editor
+ * - read_body（バックアップ含む）
+ * - collect_images / select_(single|all)
+ * - download / optimize
+ * - upload
+ * - replace_urls
+ * - diff_check
+ * - submit_update（dry-runならここは実行しない）
+ * - verify_published_article
+ * - delete_originals（オプション）
+ */
+
+/**
  * @typedef {Object} RunQicOptions
  * @property {string} qiitaArticleUrl
  * @property {"all"|"single"=} scope
@@ -28,6 +54,9 @@ import { verifyOnlyUrlChanges } from "./diffCheck.js";
  * @param {RunQicOptions} options
  */
 export async function runQic(options) {
+    // 「目標サイズ」には多少の余裕（tolerance）を持たせる。
+    // 例: target=500KB、tolerance=0.2 なら “<=600KB なら許容” とし、
+    // 余計な再圧縮で画質を落としすぎないようにする。
     const TARGET_TOLERANCE_RATIO = 0.2;
     const targetBytesMax = Math.round(options.targetBytes * (1 + TARGET_TOLERANCE_RATIO));
     const itemId = parseQiitaItemIdFromUrl(options.qiitaArticleUrl);
@@ -52,7 +81,8 @@ export async function runQic(options) {
         path.join(logsDir, `qic-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
     const logger = await createLogger({ logFilePath });
 
-    // Always log runtime identity to detect accidental execution of a different build (e.g. npx downloading another package).
+    // 実行時の同一性を必ずログに残す:
+    // 例) npx 経由で別パッケージが実行される等の事故検知に役立つ。
     logger.info("Runtime identity.", {
         cwd: process.cwd(),
         argv0: process.argv[0],
@@ -60,6 +90,7 @@ export async function runQic(options) {
         moduleUrl: import.meta.url
     });
 
+    // ブラウザ起動（headless/headedはCLIで選択）。
     const browser = await chromium.launch({ headless: options.playwright.headless });
     let storageStateToLoad = null;
     let storageStateToSave = null;
@@ -77,6 +108,7 @@ export async function runQic(options) {
         }
     }
 
+    // storageStateがあるならログイン状態（cookie/localStorage等）を復元して起動する。
     const context = await browser.newContext(storageStateToLoad ? { storageState: storageStateToLoad } : {});
     const page = await context.newPage();
 
@@ -107,6 +139,9 @@ export async function runQic(options) {
             async runInEditor({ getBody, getBodyLive, setBody, replaceUrls, uploadImageAndGetUrl, clickUpdate }) {
                 logger.info("PHASE: read_body");
                 logger.info("Reading article body from editor...");
+                // Qiita CM6 は DOM が仮想化されるため、見えている行だけが innerText に現れることがある。
+                // そのため getBodyLive()（可能ならGraphQL autosave payload等）を優先し、
+                // 取得結果が短い場合に備えて getBody()（React store等のスナップショット）とも比較する。
                 const bodyFromLive = await getBodyLive().catch(() => "");
                 const bodyFromStore = await getBody();
                 const originalBody = bodyFromLive.length >= bodyFromStore.length ? bodyFromLive : bodyFromStore;
@@ -114,6 +149,7 @@ export async function runQic(options) {
                     backupsDir,
                     `${itemId}-${new Date().toISOString().replace(/[:.]/g, "-")}.md`
                 );
+                // 自動操作前に必ず本文をバックアップする（事故時に手動復旧できるように）。
                 await fs.writeFile(backupPath, originalBody, "utf-8");
                 logger.info("Backed up article body.", { backupPath });
                 logger.info("Editor body stats.", {
@@ -140,6 +176,9 @@ export async function runQic(options) {
                 const skippedDownloadUrls = new Set();
 
                 if (scope === "single") {
+                    // scope=single:
+                    // “最初に見つかった targetBytesMax 超え画像”だけを対象にする。
+                    // → 記事が大きい場合でも影響範囲を最小化し、まずは一枚で試せる運用を想定。
                     logger.info("PHASE: select_single_image", { targetBytes: options.targetBytes, targetBytesMax });
                     logger.info("Scope=single: searching first image > targetBytesMax.", {
                         targetBytesMax,
@@ -151,8 +190,10 @@ export async function runQic(options) {
                         const url = uniqueUrls[idx];
                         const safeBase = sanitizeFilename(`img-${idx + 1}`) || `img-${idx + 1}`;
                         const originalPath = path.join(originalsDir, `${safeBase}${guessExtFromUrl(url)}`);
-                        // Qiita upload rejects image/webp. Prefer PNG output for PNG inputs (better text readability),
-                        // otherwise use JPEG.
+                        // Qiitaは image/webp をアップロードで弾く。
+                        // そのため出力は PNG/JPEG に寄せる。
+                        // - 入力がPNGならPNGのまま（スクショ等の文字がにじみにくい）
+                        // - それ以外は JPEG（容量を落としやすい）
                         const ext = path.extname(originalPath).toLowerCase();
                         const optimizedExt = ext === ".png" ? ".png" : ".jpg";
                         const optimizedPath = path.join(optimizedDir, `${safeBase}${optimizedExt}`);
@@ -216,6 +257,9 @@ export async function runQic(options) {
                         return;
                     }
                 } else {
+                    // scope=all:
+                    // すべての画像候補についてダウンロード → “targetBytesMax超え”だけ最適化対象にする。
+                    // ただし同時実行数は concurrency で制限し、S3/ローカルCPUを過負荷にしない。
                     const candidates = uniqueUrls.length;
                     logger.info("PHASE: select_images_all", { targetBytes: options.targetBytes, targetBytesMax, candidates });
                     const selected = await Promise.all(
@@ -223,8 +267,7 @@ export async function runQic(options) {
                             limit(async () => {
                                 const safeBase = sanitizeFilename(`img-${idx + 1}`) || `img-${idx + 1}`;
                                 const originalPath = path.join(originalsDir, `${safeBase}${guessExtFromUrl(url)}`);
-                                // Qiita upload rejects image/webp. Prefer PNG output for PNG inputs (better text readability),
-                                // otherwise use JPEG.
+                                // Qiitaは image/webp をアップロードで弾くため、出力は PNG/JPEG に寄せる。
                                 const ext = path.extname(originalPath).toLowerCase();
                                 const optimizedExt = ext === ".png" ? ".png" : ".jpg";
                                 const optimizedPath = path.join(optimizedDir, `${safeBase}${optimizedExt}`);
@@ -304,6 +347,8 @@ export async function runQic(options) {
                         continue;
                     }
 
+                    // 画像アップロードは「エディタ本文を触らない」経路を優先する。
+                    // （本文に余計な差分が入ると危険なため。アップロード後はURLだけ差し替える）
                     logger.info("PHASE: upload_image", { localPath: local.uploadPath });
                     logger.info(`Uploading to Qiita editor: ${local.uploadPath}`);
                     const uploadedUrl = await uploadImageAndGetUrl(local.uploadPath);
@@ -323,14 +368,15 @@ export async function runQic(options) {
                 await replaceUrls(uploadedUrlByOriginalUrl);
                 const didMutateEditor = true;
 
-                // Safety check: ensure no non-URL changes occurred before submit.
+                // 安全確認（最重要）:
+                // submit 前に「URL置換以外の変更が起きていない」ことを必ず確認する。
                 let expectedForCheck = originalBody;
                 for (const [from, to] of uploadedUrlByOriginalUrl.entries()) {
                     expectedForCheck = expectedForCheck.split(from).join(to);
                 }
 
-                // Wait a bit for the editor/store to reflect replacements before comparing.
-                // Prefer getBodyLive(): for Qiita CM6, this reads full rawBody from autosave GraphQL payload.
+                // 置換直後はエディタ内部状態（store/autosave）が追従するまでタイムラグがある。
+                // そのため短時間ポーリングして一致を待つ（特にCM6は live 取得を優先）。
                 let currentBody = await getBodyLive().catch(() => "");
                 const waitDeadline = Date.now() + 15_000;
                 while (Date.now() < waitDeadline) {
@@ -350,6 +396,7 @@ export async function runQic(options) {
                     const currentPath = path.join(artifactsDir, `${ts}-current.md`);
                     const reportPath = path.join(artifactsDir, `${ts}-diff-check.json`);
 
+                    // 後から原因分析できるよう、期待本文・実際本文・診断レポートを artifacts に保存する。
                     await fs.writeFile(expectedPath, expectedForCheck, "utf-8");
                     await fs.writeFile(currentPath, currentBody, "utf-8");
                     await fs.writeJson(reportPath, check, { spaces: 2 });
@@ -364,6 +411,9 @@ export async function runQic(options) {
                 }
 
                 if (options.dryRun) {
+                    // dry-run:
+                    // - submit（更新ボタン押下）はしない
+                    // - ただし途中でエディタ本文を触った場合、下書きが汚れるので原文に戻す
                     logger.info("--dry-run: not clicking update button.");
                     if (didMutateEditor) {
                         logger.info("--dry-run: restoring original body in editor to avoid leaving draft modified.");
@@ -376,8 +426,9 @@ export async function runQic(options) {
                 logger.info("Clicking update...");
                 const updated = await clickUpdate();
 
-                // Post-submit verification: ensure the *published* article reflects the URL changes
-                // before we delete originals. (Qiita can keep /edit URL even after save.)
+                // submit後の検証:
+                // Qiitaは保存後も /edit に留まることがあるため、
+                // 実際の公開記事HTMLに新URLが反映されたことを確認してから次の危険操作へ進む。
                 const verifyPublishedArticle = async () => {
                     const maxMs = 90_000;
                     const startedAt = Date.now();
@@ -438,7 +489,7 @@ export async function runQic(options) {
         runError = e;
         throw e;
     } finally {
-        // Save storageState even on failure (useful when user completed login/2FA but later steps failed).
+        // storageState は失敗時でも保存する（ログイン/2FAまでは通ったが後段で失敗、がよくあるため）。
         if (storageStateToSave) {
             try {
                 await fs.ensureDir(path.dirname(storageStateToSave));
@@ -457,6 +508,8 @@ export async function runQic(options) {
 }
 
 function guessExtFromUrl(url) {
+    // URL末尾のパスから拡張子を推測する。
+    // 推測できない場合は ".img" を付けて保存し、Sharp側で読み取れることに期待する。
     try {
         const u = new URL(url);
         const base = path.basename(u.pathname);
