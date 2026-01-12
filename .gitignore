@@ -1,0 +1,20 @@
+node_modules/
+out/
+secret/
+
+# logs/artifacts (in case paths change)
+*.log
+*.zip
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Playwright (if enabled elsewhere)
+playwright-report/
+test-results/
+.secrets/
+out/
+node_modules/
+
